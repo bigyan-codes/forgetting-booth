@@ -17,6 +17,18 @@ still works.
 5. Supertonic TTS speaks the reply back.
 6. Audio file, models, and cache are wiped. Certificate is issued.
 
+## Architecture
+
+Browser (16 kHz WAV in memory)  →  POST /booth  →  Flask (127.0.0.1)
+                                                       ↓
+                                       QVAC worker (Node, same machine)
+                                       ├── Whisper Tiny   →  transcript
+                                       ├── Llama 3.2 1B   →  reply
+                                       └── Supertonic 3   →  audio
+                                                       ↓
+                                       temp WAV deleted, models unloaded,
+                                       cache wiped → Certificate of Forgetting
+
 ## QVAC functions called
 
 - `load_model` — Whisper Tiny (ASR), Llama 3.2 1B (LLM), Supertonic 3 (TTS)
