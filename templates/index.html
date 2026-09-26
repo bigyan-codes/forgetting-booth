@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Forgetting Booth</title>
+<style>
+  :root {
+    --bg: #0a0a0a; --panel: #0f0f0f; --fg: #e8e6df;
+    --dim: #6b6b6b; --accent: #ffb340; --good: #8affc1;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100vh;
+    background: var(--bg); color: var(--fg);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .wrap { width: min(720px, 92vw); padding: 40px 0; }
+  h1 { font-size: 28px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 32px; }
+  .stage {
+    border: 1px solid #1f1f1f; border-radius: 8px;
+    padding: 28px; background: var(--panel);
+    min-height: 240px; display: flex; flex-direction: column; gap: 20px;
+  }
+  .label { font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--dim); margin-bottom: 6px; }
+  .transcript, .reply { font-size: 15px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .reply { color: var(--accent); }
+  .status { font-size: 13px; color: var(--dim); font-style: italic; margin-top: auto; }
+  button {
+    background: var(--fg); color: var(--bg); border: none;
+    padding: 16px 24px; font-size: 15px; font-family: inherit;
+    font-weight: 600; letter-spacing: 0.05em; cursor: pointer;
+    border-radius: 6px; transition: all .15s ease; width: 100%;
+  }
+  button:hover:not(:disabled) { background: var(--accent); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.recording { background: #ff4d4d; color: white; }
+  .btnrow { margin-top: 20px; }
+  .cert {
+    border: 1px dashed #2a2a2a; border-radius: 6px;
+    padding: 16px; font-size: 12px; color: var(--dim);
+    margin-top: 20px; display: none;
+  }
+  .cert.show { display: block; }
+  .cert .line { display: flex; justify-content: space-between; padding: 3px 0; }
+  .cert .key { opacity: 0.6; }
+  .cert .val { color: var(--good); }
+  .meter { height: 2px; background: #1a1a1a; overflow: hidden; border-radius: 2px; display: none; }
+  .meter.show { display: block; }
+  .meter > div { height: 100%; width: 0%; background: var(--accent); transition: width .1s linear; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>The Forgetting Booth</h1>
+  <div class="sub">nothing leaves this machine.</div>
+
+  <div class="stage">
+    <div>
+      <div class="label">Heard</div>
+      <div class="transcript" id="transcript">—</div>
+    </div>
+    <div>
+      <div class="label">The Void</div>
+      <div class="reply" id="reply">—</div>
+    </div>
+    <div class="status" id="status">ready.</div>
+    <div class="meter" id="meterWrap"><div id="meter"></div></div>
+  </div>
+
+  <div class="btnrow">
+    <button id="btn">confess</button>
+  </div>
+
+  <div class="cert" id="cert">
+    <div class="line"><span class="key">certificate of forgetting</span><span class="val" id="certTime"></span></div>
+    <div class="line"><span class="key">secrets retained</span><span class="val">0</span></div>
+    <div class="line"><span class="key">bytes uploaded</span><span class="val">0</span></div>
+    <div class="line"><span class="key">cache wiped</span><span class="val" id="certCache">yes</span></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const btn = $("btn"), status = $("status");
+const transcript = $("transcript"), reply = $("reply");
+const cert = $("cert"), meterWrap = $("meterWrap"), meter = $("meter");
+
+const RECORD_SECONDS = 8;
+
+function sanitizeF32(src) {
+  const out = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i++) {
+    const v = src[i];
+    out[i] = Number.isFinite(v) ? v : 0;
+  }
+  return out;
+}
+
+async function recordWav(seconds) {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  if (ctx.state === "suspended") await ctx.resume();
+
+  // Warm-up: a cold macOS AudioContext can emit junk for a few frames.
+  await new Promise(r => setTimeout(r, 150));
+
+  const actualSR = ctx.sampleRate;
+  const source = ctx.createMediaStreamSource(stream);
+  const processor = ctx.createScriptProcessor(4096, 1, 1);
+
+  // Silent sink so we don't monitor our own mic into the speakers.
+  const silentGain = ctx.createGain();
+  silentGain.gain.value = 0;
+
+  const chunks = [];
+  processor.onaudioprocess = (e) => {
+    const input = e.inputBuffer.getChannelData(0);
+    chunks.push(sanitizeF32(input));
+  };
+
+  source.connect(processor);
+  processor.connect(silentGain);
+  silentGain.connect(ctx.destination);
+
+  const start = performance.now();
+  meterWrap.classList.add("show");
+  await new Promise((resolve) => {
+    const tick = () => {
+      const elapsed = (performance.now() - start) / 1000;
+      meter.style.width = Math.min(100, (elapsed / seconds) * 100) + "%";
+      if (elapsed >= seconds) resolve(); else requestAnimationFrame(tick);
+    };
+    tick();
+  });
+
+  processor.disconnect();
+  source.disconnect();
+  silentGain.disconnect();
+  stream.getTracks().forEach(t => t.stop());
+  await ctx.close();
+  meterWrap.classList.remove("show");
+
+  const total = chunks.reduce((a, c) => a + c.length, 0);
+  const pcm = new Float32Array(total);
+  let off = 0;
+  for (const c of chunks) { pcm.set(c, off); off += c.length; }
+  return encodeWav(pcm, actualSR);
+}
+
+function encodeWav(samples, sr) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, "RIFF");
+  v.setUint32(4, 36 + samples.length * 2, true);
+  ws(8, "WAVE");
+  ws(12, "fmt ");
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true);
+  v.setUint32(28, sr * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  ws(36, "data");
+  v.setUint32(40, samples.length * 2, true);
+  let o = 44;
+  for (let i = 0; i < samples.length; i++) {
+    let s = samples[i];
+    if (!Number.isFinite(s)) s = 0;
+    s = Math.max(-1, Math.min(1, s));
+    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    o += 2;
+  }
+  return new Blob([v], { type: "audio/wav" });
+}
+
+function playWav(b64) {
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const blob = new Blob([bytes], { type: "audio/wav" });
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  return new Promise((resolve) => {
+    audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+    audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+    audio.play().catch(() => resolve());
+  });
+}
+
+btn.addEventListener("click", async () => {
+  btn.disabled = true;
+  cert.classList.remove("show");
+  transcript.textContent = "—";
+  reply.textContent = "—";
+
+  try {
+    btn.classList.add("recording");
+    btn.textContent = "listening…";
+    status.textContent = "recording " + RECORD_SECONDS + "s — speak now";
+    const wavBlob = await recordWav(RECORD_SECONDS);
+    btn.classList.remove("recording");
+
+    status.textContent = "transcribing locally…";
+    const fd = new FormData();
+    fd.append("audio", wavBlob, "confession.wav");
+    const res = await fetch("/booth", { method: "POST", body: fd });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    transcript.textContent = data.transcript || "(nothing heard)";
+    reply.textContent = data.reply || "—";
+
+    if (data.audio_b64) {
+      status.textContent = "the void speaks…";
+      btn.textContent = "listening…";
+      await playWav(data.audio_b64);
+    }
+
+    status.textContent = "forgetting…";
+    const fRes = await fetch("/forget", { method: "POST" });
+    const fData = await fRes.json();
+    document.getElementById("certTime").textContent = new Date().toISOString().slice(11, 19);
+    document.getElementById("certCache").textContent = fData.ok ? "yes" : "best-effort";
+    cert.classList.add("show");
+    status.textContent = "forgotten.";
+    btn.textContent = "confess again";
+  } catch (e) {
+    status.textContent = "error: " + e.message;
+    btn.textContent = "try again";
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove("recording");
+  }
+});
+</script>
+</body>
+</html>
